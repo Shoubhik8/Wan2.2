@@ -1,6 +1,9 @@
-torch>=2.4.0
-torchvision>=0.19.0
-torchaudio
+# PyTorch CUDA 12.4 builds — keep torch/vision/audio on the SAME line.
+# Do NOT let pip pull the cu13 / 2.12 builds: flash-attn has no wheel for them.
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+torchaudio==2.6.0+cu124
 opencv-python>=4.9.0.80
 diffusers>=0.31.0
 transformers>=4.49.0,<=4.51.3
@@ -10,7 +13,21 @@ tqdm
 imageio[ffmpeg]
 easydict
 ftfy
-dashscope
 imageio-ffmpeg
-flash_attn
 numpy>=1.23.5,<2
+# NOTE: flash-attn is intentionally NOT pinned here as a wheel.
+# The download.pytorch.org torch 2.6 wheel uses the OLD C++ ABI
+# (_GLIBCXX_USE_CXX11_ABI=0), but flash-attn's prebuilt "cxx11abiFALSE" wheels
+# for torch 2.6 are actually compiled abiTRUE -> they fail to import with
+# "undefined symbol: _ZN3c105Error...__cxx11...". Build it from source AFTER
+# installing this file so it matches the installed torch ABI exactly:
+#
+#   pip install ninja packaging
+#   MAX_JOBS=8 TORCH_CUDA_ARCH_LIST="8.9" FLASH_ATTENTION_FORCE_BUILD=TRUE \
+#       pip install flash-attn==2.8.3 --no-build-isolation
+#
+# - TORCH_CUDA_ARCH_LIST = your GPU's compute capability: L40S/4090=8.9,
+#   A100=8.0, H100=9.0 — avoids building every architecture.
+# - Keep MAX_JOBS LOW: each CUDA compile unit needs ~10-16 GB RAM. MAX_JOBS=8
+#   peaks ~130 GB. Too high -> the build gets OOM-killed ("Killed" in the log).
+#   Rule of thumb: MAX_JOBS = available_RAM_GB / 16.

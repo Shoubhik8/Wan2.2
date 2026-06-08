@@ -1,4 +1,13 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+"""
+Optimised entry point: identical to ``generate.py`` but adds ``--cache_threshold``
+and routes the t2v / ti2v / i2v tasks through the TeaCache-enabled pipelines
+(``Wan*_Optimised``). animate / s2v are out of scope and use the originals.
+
+The optimised pipeline classes are imported directly from their modules (NOT via
+``wan/__init__.py``), so no original file is touched. With ``--cache_threshold 0.0``
+(the default) the result is byte-identical to ``generate.py``.
+"""
 import argparse
 import logging
 import os
@@ -19,6 +28,12 @@ from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CON
 from wan.distributed.util import init_distributed_group
 # from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
 from wan.utils.utils import merge_video_audio, save_video, str2bool
+
+# Optimised (TeaCache) pipelines -- imported directly so wan/__init__.py stays
+# untouched.
+from wan.text2video_optimised import WanT2V_Optimised
+from wan.image2video_optimised import WanI2V_Optimised
+from wan.textimage2video_optimised import WanTI2V_Optimised
 
 
 EXAMPLE_PROMPT = {
@@ -221,6 +236,15 @@ def _parse_args():
         action="store_true",
         default=False,
         help="Whether to convert model paramerters dtype.")
+    parser.add_argument(
+        "--cache_threshold",
+        type=float,
+        default=0.0,
+        help="TeaCache-style step-cache threshold (t2v/ti2v/i2v only). 0.0 "
+        "(default) disables caching and is byte-identical to generate.py. "
+        "Aggressive ~0.1 skips ~30-40%% of block-stack computes; 0.15-0.2 "
+        "skips ~50-60%%. One-time warmup-free; trades a little quality for "
+        "speed.")
 
     # animate
     parser.add_argument(
@@ -244,7 +268,7 @@ def _parse_args():
         action="store_true",
         default=False,
         help="Whether to use relighting lora.")
-    
+
     # following args only works for s2v
     parser.add_argument(
         "--num_clip",
@@ -401,8 +425,9 @@ def generate(args):
         logging.info(f"Extended prompt: {args.prompt}")
 
     if "t2v" in args.task:
-        logging.info("Creating WanT2V pipeline.")
-        wan_t2v = wan.WanT2V(
+        logging.info("Creating WanT2V_Optimised pipeline "
+                     f"(cache_threshold={args.cache_threshold}).")
+        wan_t2v = WanT2V_Optimised(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
             device_id=device,
@@ -412,6 +437,7 @@ def generate(args):
             use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            cache_threshold=args.cache_threshold,
         )
 
         logging.info(f"Generating video ...")
@@ -426,8 +452,9 @@ def generate(args):
             seed=args.base_seed,
             offload_model=args.offload_model)
     elif "ti2v" in args.task:
-        logging.info("Creating WanTI2V pipeline.")
-        wan_ti2v = wan.WanTI2V(
+        logging.info("Creating WanTI2V_Optimised pipeline "
+                     f"(cache_threshold={args.cache_threshold}).")
+        wan_ti2v = WanTI2V_Optimised(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
             device_id=device,
@@ -437,6 +464,7 @@ def generate(args):
             use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            cache_threshold=args.cache_threshold,
         )
 
         logging.info(f"Generating video ...")
@@ -514,8 +542,9 @@ def generate(args):
             init_first_frame=args.start_from_ref,
         )
     else:
-        logging.info("Creating WanI2V pipeline.")
-        wan_i2v = wan.WanI2V(
+        logging.info("Creating WanI2V_Optimised pipeline "
+                     f"(cache_threshold={args.cache_threshold}).")
+        wan_i2v = WanI2V_Optimised(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
             device_id=device,
@@ -525,6 +554,7 @@ def generate(args):
             use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            cache_threshold=args.cache_threshold,
         )
         logging.info("Generating video ...")
         video = wan_i2v.generate(
