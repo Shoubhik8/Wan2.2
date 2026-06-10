@@ -74,6 +74,7 @@ class WanTI2V:
         """
         self.device = torch.device(f"cuda:{device_id}")
         self.config = config
+        
         self.rank = rank
         self.t5_cpu = t5_cpu
         self.init_on_cpu = init_on_cpu
@@ -458,19 +459,35 @@ class WanTI2V:
                 - H: Frame height (from max_area)
                 - W: Frame width (from max_area)
         """
+        # debug log for this run (overwritten each call)
+        dbg_path = os.path.join(os.getcwd(), "i2v_debug.md")
+        def dbg(msg):
+            with open(dbg_path, "a") as _f:
+                _f.write(str(msg) + "\n")
+        with open(dbg_path, "w") as _f:   # truncate at start of run
+            _f.write("# I2V debug log\n\n")
+
         # preprocess
         ih, iw = img.height, img.width
-        dh, dw = self.patch_size[1] * self.vae_stride[1], self.patch_size[
-            2] * self.vae_stride[2]
+        dbg(f"Lets start by printing the height and the width of the original image: HeightL {ih}, Width:{iw}")
+        dbg(f"Patch Size: {self.patch_size}, VAE Stride: {self.vae_stride}")
+        dh, dw = self.patch_size[1] * self.vae_stride[1], self.patch_size[2] * self.vae_stride[2]
+        dbg(f"this is dh and dw: {dh}, {dw}")
         ow, oh = best_output_size(iw, ih, dw, dh, max_area)
+        dbg(f"This is the best output size: {ow}, {oh}")
 
         scale = max(ow / iw, oh / ih)
+        dbg(f"This is the scale {scale}")
+        dbg(f"Size of the image before resizing: height={img.height}, width={img.width}")
         img = img.resize((round(iw * scale), round(ih * scale)), Image.LANCZOS)
+        dbg(f"Size of the image after resizing: height={img.height}, width={img.width}")
+
 
         # center-crop
         x1 = (img.width - ow) // 2
         y1 = (img.height - oh) // 2
         img = img.crop((x1, y1, x1 + ow, y1 + oh))
+        dbg(f"Size of the image after cropping: height={img.height}, width={img.width}")
         assert img.width == ow and img.height == oh
 
         # to tensor
@@ -481,7 +498,7 @@ class WanTI2V:
             oh // self.vae_stride[1]) * (ow // self.vae_stride[2]) // (
                 self.patch_size[1] * self.patch_size[2])
         seq_len = int(math.ceil(seq_len / self.sp_size)) * self.sp_size
-
+        dbg(f"OOOOOK, this is the seq len: {seq_len}")
         seed = seed if seed >= 0 else random.randint(0, sys.maxsize)
         seed_g = torch.Generator(device=self.device)
         seed_g.manual_seed(seed)
@@ -492,6 +509,7 @@ class WanTI2V:
             dtype=torch.float32,
             generator=seed_g,
             device=self.device)
+        dbg(f"The noise tensor has been just generated and this is the shape: {noise.shape}")
 
         if n_prompt == "":
             n_prompt = self.sample_neg_prompt
@@ -510,6 +528,7 @@ class WanTI2V:
             context_null = [t.to(self.device) for t in context_null]
 
         z = self.vae.encode([img])
+        dbg(f"Well Well the image latent has been generated, its called z: len={len(z)}, z[0].shape={z[0].shape}")
 
         @contextmanager
         def noop_no_sync():
@@ -545,10 +564,36 @@ class WanTI2V:
             else:
                 raise NotImplementedError("Unsupported solver.")
 
+            dbg(f"The timestep vector has been just generated, here is the shape: {timesteps.shape}")
+            dbg(f"why not have a look at the entire timestep vector: {timesteps}")
+
             # sample videos
             latent = noise
             mask1, mask2 = masks_like([noise], zero=True)
+            dbg(f"The masks which have been troubling us are here: len(mask1)={len(mask1)}, mask1[0].shape={mask1[0].shape}, len(mask2)={len(mask2)}, mask2[0].shape={mask2[0].shape}")
+            dbg(f"lets have a little peak into this baddies: {mask1[0][:2]}")
+
+            # keep a copy of the latent BEFORE the masking op so we can compare
+            latent_before = latent.clone()
             latent = (1. - mask2[0]) * z[0] + mask2[0] * latent
+
+            dbg(f"Lets see how the latent has changed after it has been multiplied with the mask")
+            # latent shape is [C, T, H, W] -> dim 1 is the temporal (frame) axis
+            num_frames = latent.shape[1]
+            dbg(f"latent shape: {tuple(latent.shape)}  (assuming axis 1 = {num_frames} frames)")
+            for f in range(num_frames):
+                # per-frame absolute change between before and after the op
+                diff = (latent[:, f] - latent_before[:, f]).abs()
+                changed = diff.max().item() > 0
+                dbg(
+                    f"  frame {f:>2}: changed={changed}  "
+                    f"max_abs_diff={diff.max().item():.6f}  "
+                    f"mean_abs_diff={diff.mean().item():.6f}  "
+                    f"num_changed_elems={int((diff > 0).sum().item())}/{diff.numel()}"
+                )
+            # also confirm the first frame now equals the image latent z
+            first_frame_is_z = torch.allclose(latent[:, 0], z[0][:, 0])
+            dbg(f"first frame of latent == first frame of image latent z? {first_frame_is_z}")
 
             arg_c = {
                 'context': [context[0]],
@@ -564,18 +609,25 @@ class WanTI2V:
                 self.model.to(self.device)
                 torch.cuda.empty_cache()
 
-            for _, t in enumerate(tqdm(timesteps)):
+            dbg(f"Before the for loop of the timesteps begin, lets examine the mask which is going into the calculations: {mask2[0][0][:, ::2, ::2].shape}")
+            for idx, t in enumerate(tqdm(timesteps)):
+                dbg(f"this is iteration {idx}")
                 latent_model_input = [latent.to(self.device)]
                 timestep = [t]
+                dbg(f"len(timestep)={len(timestep)}")
 
                 timestep = torch.stack(timestep).to(self.device)
+                dbg(f"shape of timestep before mutliplication with mask: {timestep.shape}")
 
                 temp_ts = (mask2[0][0][:, ::2, ::2] * timestep).flatten()
+                dbg(f"shape of timestep after mutliplication with mask: {temp_ts.shape}")
                 temp_ts = torch.cat([
                     temp_ts,
                     temp_ts.new_ones(seq_len - temp_ts.size(0)) * timestep
                 ])
+                dbg(f"shape of timestep after concat: {temp_ts.shape}")
                 timestep = temp_ts.unsqueeze(0)
+                dbg(f"This is the final timestep shape before going into the model: {timestep.shape}")
 
                 noise_pred_cond = self.model(
                     latent_model_input, t=timestep, **arg_c)[0]
